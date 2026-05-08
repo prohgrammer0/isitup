@@ -1,0 +1,6 @@
+name = "isitup"
+main = "main.ts"
+compatibility_date = "2026-05-08"
+
+[observability]
+enabled = true
