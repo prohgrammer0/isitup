@@ -37,8 +37,8 @@ be tested without a real Access JWT.
 ## Cloudflare Access Setup
 
 This Worker expects Cloudflare Access to protect the deployed route and
-validates the Access JWT inside the Worker. Add these Worker variables in the
-Cloudflare dashboard:
+validates the Access JWT inside the Worker. The required Access values are
+configured in `wrangler.toml`:
 
 | Variable          | Value                                                              |
 | ----------------- | ------------------------------------------------------------------ |
@@ -46,14 +46,8 @@ Cloudflare dashboard:
 | `ACCESS_JWKS_URL` | `https://rustyrohbot.cloudflareaccess.com/cdn-cgi/access/certs`    |
 | `ACCESS_ISSUER`   | `https://rustyrohbot.cloudflareaccess.com`                         |
 
-Dashboard path:
-
-1. Open Cloudflare dashboard.
-2. Go to **Workers & Pages**.
-3. Select the `isitup` Worker.
-4. Go to **Settings**.
-5. Add the variables above under **Variables and Secrets**.
-6. Deploy the Worker again.
+These values are not secrets. They identify the Access application and the
+public key endpoint used to verify JWT signatures.
 
 If any of these variables are missing in production, the Worker returns
 `500 Access auth is not configured` instead of serving the dashboard without JWT

@@ -2,5 +2,10 @@ name = "isitup"
 main = "main.ts"
 compatibility_date = "2026-05-08"
 
+[vars]
+ACCESS_AUD = "cbd0eb163411996cc08960b16d863ec1c4aec6eff6ea013252b1539dbb7578af"
+ACCESS_JWKS_URL = "https://rustyrohbot.cloudflareaccess.com/cdn-cgi/access/certs"
+ACCESS_ISSUER = "https://rustyrohbot.cloudflareaccess.com"
+
 [observability]
 enabled = true
