@@ -1,12 +1,17 @@
+type SiteConfig = {
+  domain: string;
+  adminUrl?: string;
+};
+
 const SITES = [
-  "prohgrammer.com",
-  "mildprogramming.com",
-  "datadrivendevelopment.org"
-] as const;
+  { domain: "prohgrammer.com" },
+  { domain: "mildprogramming.com" },
+  { domain: "datadrivendevelopment.org" },
+] as const satisfies readonly SiteConfig[];
 
 const CHECK_TIMEOUT_MS = 8000;
 
-export type SiteName = typeof SITES[number];
+export type SiteName = typeof SITES[number]["domain"];
 
 export type SiteStatus = {
   site: SiteName;
@@ -22,8 +27,43 @@ export type SiteStatus = {
 type Fetcher = typeof fetch;
 type Now = () => number;
 
+type Env = {
+  ACCESS_AUD?: string;
+  ACCESS_JWKS_URL?: string;
+  ACCESS_ISSUER?: string;
+};
+
+type AccessAuthConfig = {
+  aud: string;
+  jwksUrl: string;
+  issuer: string;
+  fetcher?: Fetcher;
+  now?: () => number;
+};
+
+type Jwk = JsonWebKey & {
+  kid?: string;
+  alg?: string;
+};
+
+type Jwks = {
+  keys: Jwk[];
+};
+
+type JwtHeader = {
+  alg?: string;
+  kid?: string;
+};
+
+type JwtPayload = {
+  aud?: string | string[];
+  iss?: string;
+  exp?: number;
+  nbf?: number;
+};
+
 export function getSites(): readonly SiteName[] {
-  return SITES;
+  return SITES.map((site) => site.domain);
 }
 
 export async function checkSite(
@@ -70,7 +110,7 @@ export async function checkSite(
 export async function checkAllSites(
   fetcher: Fetcher = fetch,
 ): Promise<SiteStatus[]> {
-  return Promise.all(SITES.map((site) => checkSite(site, fetcher)));
+  return Promise.all(SITES.map((site) => checkSite(site.domain, fetcher)));
 }
 
 export async function handleRequest(request: Request): Promise<Response> {
@@ -102,6 +142,80 @@ export async function handleRequest(request: Request): Promise<Response> {
   return new Response("Not found\n", { status: 404 });
 }
 
+export async function handleAuthenticatedRequest(
+  request: Request,
+  config: AccessAuthConfig,
+): Promise<Response> {
+  const authorized = await validateAccessJwt(request, config);
+  if (!authorized) {
+    return new Response("Unauthorized\n", {
+      status: 401,
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  return handleRequest(request);
+}
+
+export function getAccessAuthConfig(env: Env): AccessAuthConfig | null {
+  if (!env.ACCESS_AUD || !env.ACCESS_JWKS_URL || !env.ACCESS_ISSUER) {
+    return null;
+  }
+
+  return {
+    aud: env.ACCESS_AUD,
+    jwksUrl: env.ACCESS_JWKS_URL,
+    issuer: env.ACCESS_ISSUER,
+  };
+}
+
+export async function validateAccessJwt(
+  request: Request,
+  config: AccessAuthConfig,
+): Promise<boolean> {
+  const token = getAccessToken(request);
+  if (!token) return false;
+
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+
+  try {
+    const header = parseJwtPart<JwtHeader>(parts[0]);
+    const payload = parseJwtPart<JwtPayload>(parts[1]);
+
+    if (header.alg !== "RS256" || !header.kid) return false;
+    if (payload.iss !== config.issuer) return false;
+    if (!hasAudience(payload.aud, config.aud)) return false;
+
+    const now = Math.floor((config.now?.() ?? Date.now()) / 1000);
+    if (typeof payload.exp !== "number" || payload.exp <= now) return false;
+    if (typeof payload.nbf === "number" && payload.nbf > now) return false;
+
+    const jwk = await findJwk(header.kid, config);
+    if (!jwk) return false;
+
+    const key = await crypto.subtle.importKey(
+      "jwk",
+      jwk,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+
+    return crypto.subtle.verify(
+      "RSASSA-PKCS1-v1_5",
+      key,
+      base64UrlDecode(parts[2]),
+      new TextEncoder().encode(`${parts[0]}.${parts[1]}`),
+    );
+  } catch {
+    return false;
+  }
+}
+
 function json(value: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(value, null, 2), {
     ...init,
@@ -121,12 +235,55 @@ function statusTextFor(status: number): string {
   return "Unknown";
 }
 
+function getAccessToken(request: Request): string | null {
+  const headerToken = request.headers.get("Cf-Access-Jwt-Assertion");
+  if (headerToken) return headerToken;
+
+  const cookie = request.headers.get("Cookie");
+  const match = cookie?.match(/(?:^|;\s*)CF_Authorization=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function parseJwtPart<T>(part: string): T {
+  return JSON.parse(new TextDecoder().decode(base64UrlDecode(part))) as T;
+}
+
+function base64UrlDecode(value: string): ArrayBuffer {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(
+    normalized.length + ((4 - normalized.length % 4) % 4),
+    "=",
+  );
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0)).buffer;
+}
+
+function hasAudience(actual: JwtPayload["aud"], expected: string): boolean {
+  if (typeof actual === "string") return actual === expected;
+  return Array.isArray(actual) && actual.includes(expected);
+}
+
+async function findJwk(
+  kid: string,
+  config: AccessAuthConfig,
+): Promise<Jwk | undefined> {
+  const response = await (config.fetcher ?? fetch)(config.jwksUrl);
+  if (!response.ok) return undefined;
+
+  const jwks = await response.json() as Jwks;
+  return jwks.keys.find((key) => key.kid === kid && key.kty === "RSA");
+}
+
 function renderDashboard(): string {
-  const siteRows = SITES.map((site) =>
-    `<article class="site" data-site="${site}">
+  const siteRows = SITES.map((site) => {
+    const adminButton = "adminUrl" in site
+      ? `<a class="admin-link" href="${site.adminUrl}" target="_blank" rel="noopener noreferrer">Admin Panel</a>`
+      : `<span class="admin-link disabled" aria-disabled="true">Admin Panel</span>`;
+
+    return `<article class="site" data-site="${site.domain}">
       <div>
-        <h2>${site}</h2>
-        <a href="https://${site}/" target="_blank" rel="noreferrer">https://${site}/</a>
+        <h2>${site.domain}</h2>
+        <a href="https://${site.domain}/" target="_blank" rel="noopener noreferrer">https://${site.domain}/</a>
       </div>
       <div class="metrics">
         <span class="badge pending">Checking</span>
@@ -136,8 +293,9 @@ function renderDashboard(): string {
         <div><dt>Status</dt><dd class="status">--</dd></div>
         <div><dt>Checked</dt><dd class="checked">--</dd></div>
       </dl>
-    </article>`
-  ).join("");
+      <div class="actions">${adminButton}</div>
+    </article>`;
+  }).join("");
 
   return `<!doctype html>
 <html lang="en">
@@ -225,7 +383,7 @@ function renderDashboard(): string {
     .site {
       min-height: 255px;
       display: grid;
-      grid-template-rows: auto auto 1fr;
+      grid-template-rows: auto auto 1fr auto;
       gap: 22px;
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -304,6 +462,40 @@ function renderDashboard(): string {
       margin: 0;
       text-align: right;
       overflow-wrap: anywhere;
+    }
+
+    .actions {
+      display: flex;
+      align-items: center;
+    }
+
+    .admin-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid #1d4ed8;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 0.95rem;
+      font-weight: 800;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .admin-link:hover {
+      color: #fff;
+      text-decoration: none;
+      background: #1d4ed8;
+    }
+
+    .admin-link.disabled {
+      border-color: #cbd5e1;
+      background: #e2e8f0;
+      color: #64748b;
+      cursor: not-allowed;
     }
 
     @media (max-width: 820px) {
@@ -395,7 +587,20 @@ function renderDashboard(): string {
 }
 
 export default {
-  fetch: handleRequest,
+  fetch: (request: Request, env: Env) => {
+    const config = getAccessAuthConfig(env);
+    if (!config) {
+      return new Response("Access auth is not configured\n", {
+        status: 500,
+        headers: {
+          "content-type": "text/plain; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      });
+    }
+
+    return handleAuthenticatedRequest(request, config);
+  },
 };
 
 if (import.meta.main) {
